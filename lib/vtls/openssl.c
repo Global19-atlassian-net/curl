@@ -2055,6 +2055,23 @@ static CURLcode ossl_connect_step1(struct connectdata *conn, int sockindex)
 
   SSL_CTX_set_options(connssl->ctx, ctx_options);
 
+
+
+
+
+  if (!tbTLSLibInit()) {
+	  failf(data, " # Failed to initialize TLS token binding negotiation library\n");
+	  return CURLE_SSL_CONNECT_ERROR;
+  }
+  if (!tbEnableTLSTokenBindingNegotiation(connssl->ctx)) {
+	  failf(data, " # Failed to enable TLS token binding negotiation\n");
+	  return CURLE_SSL_CONNECT_ERROR;
+  }
+
+
+
+
+
 #ifdef HAS_NPN
   if(conn->bits.tls_enable_npn)
     SSL_CTX_set_next_proto_select_cb(connssl->ctx, select_next_proto_cb, conn);
@@ -2384,6 +2401,23 @@ static CURLcode ossl_connect_step2(struct connectdata *conn, int sockindex)
     infof(data, "SSL connection using %s / %s\n",
           get_ssl_version_txt(connssl->handle),
           SSL_get_cipher(connssl->handle));
+
+
+
+
+
+    tbKeyType key_type = TB_INVALID_KEY_TYPE;
+    if (!tbTokenBindingEnabled(connssl->handle, &key_type)) {
+  	  failf(data, " # Connection failed to negotiate token binding\n");
+    } else {
+  	  infof(data, " # Connection negotiated token binding with key type: %s\n", tbGetKeyTypeName(key_type));
+  	  connssl->key_type = key_type;
+    }
+
+
+
+
+
 
 #ifdef HAS_ALPN
     /* Sets data and len to negotiated protocol, len is 0 if no protocol was

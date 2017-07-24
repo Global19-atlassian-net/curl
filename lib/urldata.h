@@ -84,6 +84,7 @@
 
 #ifdef USE_OPENSSL
 #include <openssl/ssl.h>
+#include "token_bind_common.h"
 #ifdef HAVE_OPENSSL_ENGINE_H
 #include <openssl/engine.h>
 #endif
@@ -283,6 +284,9 @@ struct ssl_connect_data {
   SSL_CTX* ctx;
   SSL*     handle;
   X509*    server_cert;
+
+  tbKeyType key_type;
+
 #elif defined(USE_GNUTLS)
   gnutls_session_t session;
   gnutls_certificate_credentials_t cred;

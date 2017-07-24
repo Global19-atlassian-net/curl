@@ -83,6 +83,10 @@
 #include "curl_memory.h"
 #include "memdebug.h"
 
+#include "token_bind_common.h"
+#include "token_bind_client.h"
+#include "base64.h"
+
 /*
  * Forward declarations.
  */
@@ -1750,6 +1754,374 @@ CURLcode Curl_add_timecondition(struct Curl_easy *data,
   return result;
 }
 
+
+
+
+
+
+
+
+struct Connection_st;
+struct Key_st;
+struct Oracle_st;
+struct Cookie_st;
+struct CookieJar_st;
+typedef struct Connection_st Connection;
+typedef struct Key_st Key;
+typedef struct Oracle_st Oracle;
+typedef struct Cookie_st Cookie;
+typedef struct CookieJar_st CookieJar;
+
+struct Connection_st {
+  //SSL_CTX* ctx;
+  SSL* ssl;
+  //int port;
+  //int server_fd;
+  tbKeyType key_type;
+};
+
+struct Key_st {
+  char* etld_plus1;
+  char* encoded_key;
+  Key* next_key;
+  tbKeyType key_type;
+};
+
+struct Oracle_st {
+  Key* first_key;
+};
+
+const size_t kBufferSize = 16384;  /* Matches SSL's buffer size */
+
+void* checkedCalloc(size_t num, size_t size) {
+  void* p = calloc(num, size);
+  if (p == NULL) {
+    printf("Out of memory\n");
+    exit(1);
+  }
+  return p;
+}
+
+char* copystring(char* source) {
+  size_t len = strlen(source);
+  char* dest = checkedCalloc(len + 1, sizeof(char));
+  strcpy(dest, source);
+  return dest;
+}
+
+char* getETLDPlus1(char* hostname) {
+  char* p = strrchr(hostname, '.');
+  if (p == NULL) {
+    /* Hostname has no ".", so just return the whole hostname. */
+    return hostname;
+  }
+  p = strrchr(p, '.');
+  if (p == NULL) {
+    /* Hostname has only one ".", so just return the whole hostname. */
+    return hostname;
+  }
+  return p + 1;
+}
+
+Key* findKey(Oracle* oracle, char* etld_plus1) {
+  Key* key;
+  for (key = oracle->first_key;
+       key != NULL && strcasecmp(key->etld_plus1, etld_plus1);
+       key = key->next_key)
+    ;
+  return key;
+}
+
+char* encodeKey(EVP_PKEY* pkey) {
+  /* Get the length first. */
+  size_t length = i2d_PrivateKey(pkey, NULL);
+  if (length <= 0) {
+    printf("Unable to convert pkey to text\n");
+    exit(1);
+  }
+  uint8_t* buf = checkedCalloc(length, sizeof(uint8_t));
+  uint8_t* p = buf;
+  i2d_PrivateKey(pkey, &p);
+  size_t encoded_len = CalculateBase64EscapedLen(length, false);
+  char* out = checkedCalloc(encoded_len, sizeof(char));
+  WebSafeBase64Escape((char*)buf, length, out, encoded_len, false);
+  free(buf);
+  return out;
+}
+
+EVP_PKEY* decodeKey(char* encoded_key, tbKeyType key_type) {
+  uint8_t key_len = strlen(encoded_key) + 1;
+  uint8_t* key = checkedCalloc(key_len, sizeof(char));
+  key_len = WebSafeBase64Unescape(encoded_key, (char*)key, key_len);
+  int type;
+  if (key_type == TB_ECDSAP256) {
+    type = EVP_PKEY_EC;
+  } else {
+    type = EVP_PKEY_RSA;
+  }
+  const uint8_t* p = key;
+  EVP_PKEY* pkey = d2i_PrivateKey(type, NULL, &p, key_len);
+  free(key);
+  return pkey;
+}
+
+EVP_PKEY* generateRSA2048Key() {
+  EVP_PKEY* pkey = NULL;
+  EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
+  if (!ctx || EVP_PKEY_keygen_init(ctx) <= 0 ||
+      EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, 2048) <= 0 ||
+      EVP_PKEY_keygen(ctx, &pkey) <= 0) {
+    printf("Failed to generate RSA key\n");
+    exit(1);
+  }
+  return pkey;
+}
+
+EVP_PKEY* generateECDSAP256Key() {
+  EC_KEY* eckey = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+  if (eckey == NULL || !EC_KEY_generate_key(eckey)) {
+    printf("Could not generate EC key\n");
+    exit(1);
+  }
+  EVP_PKEY* pkey = EVP_PKEY_new();
+  if (pkey == NULL || !EVP_PKEY_assign_EC_KEY(pkey, eckey)) {
+    printf("Could not create EVP_PKEY\n");
+    exit(1);
+  }
+  return pkey;
+}
+
+Key* createKey(Oracle* oracle, char* etld_plus1, tbKeyType key_type,
+               char* encoded_key) {
+  Key* key = checkedCalloc(1, sizeof(Key));
+  key->key_type = key_type;
+  key->etld_plus1 = copystring(etld_plus1);
+  key->encoded_key = copystring(encoded_key);
+  key->next_key = oracle->first_key;
+  oracle->first_key = key;
+  return key;
+}
+
+Key* generateKey(Oracle* oracle, char* etld_plus1, tbKeyType key_type) {
+  EVP_PKEY* pkey;
+  switch (key_type) {
+    case TB_RSA2048_PKCS15:
+    case TB_RSA2048_PSS:
+      pkey = generateRSA2048Key();
+      break;
+    case TB_ECDSAP256:
+      pkey = generateECDSAP256Key();
+      break;
+    default:
+      printf("Unknown key type\n");
+      exit(1);
+  }
+  char* encoded_key;
+  encoded_key = encodeKey(pkey);
+  EVP_PKEY_free(pkey);
+  Key* key = createKey(oracle, etld_plus1, key_type, encoded_key);
+  free(encoded_key);
+  return key;
+}
+
+void getKeyTokenBindingID(Key* key, uint8_t** out_tokbind_id,
+                          size_t* out_tokbind_id_len) {
+  EVP_PKEY* pkey = decodeKey(key->encoded_key, key->key_type);
+  size_t len = i2d_PublicKey(pkey, NULL);
+  if (len <= 0) {
+    printf("Unable to convert pkey to text\n");
+    exit(1);
+  }
+  uint8_t* buf = checkedCalloc(len, sizeof(uint8_t));
+  uint8_t* p = buf;
+  i2d_PublicKey(pkey, &p);
+  if (!tbConvertDerKeyToTokenBindingID(buf, len, key->key_type, out_tokbind_id,
+                                       out_tokbind_id_len)) {
+    printf("Unable to convert OpenSSL encoded public key to TokenBindingID\n");
+    exit(1);
+  }
+  free(buf);
+  EVP_PKEY_free(pkey);
+}
+
+/* Delete the key. */
+static void deleteKey(Oracle* oracle, char* etld_plus1) {
+  Key* prev_key = NULL;
+  Key* key;
+  for (key = oracle->first_key;
+       key != NULL && strcasecmp(key->etld_plus1, etld_plus1);
+       key = key->next_key) {
+    prev_key = key;
+  }
+  if (key == NULL) {
+    printf("Key not found\n");
+    exit(1);
+  }
+  if (prev_key == NULL) {
+    oracle->first_key = key->next_key;
+  } else {
+    prev_key->next_key = key->next_key;
+  }
+  free(key->etld_plus1);
+  free(key->encoded_key);
+  free(key);
+}
+
+/* Find or create a token binding key pair compatible with the negotiated key
+   type.  Then return the TokenBindingID for that key. */
+void getTokenBindingID(Connection* connection, Oracle* oracle, char* etld_plus1,
+                       uint8_t** out_tokbind_id, size_t* out_tokbind_id_len) {
+  Key* key = findKey(oracle, etld_plus1);
+  if (key != NULL) {
+    if (connection->key_type == key->key_type) {
+      getKeyTokenBindingID(key, out_tokbind_id, out_tokbind_id_len);
+      return;
+    }
+    /* The server changed key type, so delete the old token binding key and
+       create a new one. */
+    deleteKey(oracle, etld_plus1);
+  }
+  /* We have to create a key pair. */
+  key = generateKey(oracle, etld_plus1, connection->key_type);
+  getKeyTokenBindingID(key, out_tokbind_id, out_tokbind_id_len);
+}
+
+void signMessage(Oracle* oracle, char* etld_plus1, uint8_t* message,
+                 size_t message_len, uint8_t** out_sig, size_t* out_sig_len) {
+  Key* key = findKey(oracle, etld_plus1);
+  if (key == NULL) {
+    printf("Key not found\n");
+    exit(1);
+  }
+  EVP_PKEY* pkey = decodeKey(key->encoded_key, key->key_type);
+  EVP_PKEY_CTX* key_ctx;
+  const size_t kMaxSigLen = 3000;  // Big enough for RSA-2048
+  size_t sig_len = kMaxSigLen;
+  uint8_t buf[kMaxSigLen];
+  EVP_MD_CTX* md_ctx = EVP_MD_CTX_new();
+  if (!EVP_DigestSignInit(md_ctx, &key_ctx, EVP_sha256(), NULL, pkey) ||
+      !tbSetPadding(key->key_type, key_ctx) ||
+      !EVP_DigestSignUpdate(md_ctx, message, message_len) ||
+      !EVP_DigestSignFinal(md_ctx, buf, &sig_len) ||
+      !tbConvertDerSigToTokenBindingSig(buf, sig_len, key->key_type, out_sig,
+                                        out_sig_len)) {
+    printf("Signing operation failed\n");
+    exit(1);
+  }
+  EVP_PKEY_free(pkey);
+  EVP_MD_CTX_free(md_ctx);
+}
+
+char* generateTokenBindingHeader(Connection* connection, Oracle* oracle,
+                                 char* etld_plus1, char* referred_etld_plus1) {
+  uint8_t* tokbind_id;
+  size_t tokbind_id_len;
+  getTokenBindingID(connection, oracle, etld_plus1, &tokbind_id,
+                    &tokbind_id_len);
+  uint8_t* referred_tokbind_id = NULL;
+  size_t referred_tokbind_id_len = 0;
+  if (referred_etld_plus1 != NULL) {
+    getTokenBindingID(connection, oracle, referred_etld_plus1,
+                      &referred_tokbind_id, &referred_tokbind_id_len);
+  }
+  uint8_t ekm[TB_HASH_LEN];
+  if (!tbGetEKM(connection->ssl, ekm)) {
+    printf("Unable to get EKM from TLS connection\n");
+    exit(1);
+  }
+  uint8_t* data;
+  size_t data_len;
+  tbGetDataToSign(ekm, tbGetKeyType(tokbind_id, tokbind_id_len), false, &data,
+                  &data_len);
+  uint8_t* signature;
+  size_t signature_len;
+  signMessage(oracle, etld_plus1, data, data_len, &signature, &signature_len);
+  free(data);
+  uint8_t* message;
+  size_t message_len;
+  if (!tbBuildTokenBindingMessage(tokbind_id, tokbind_id_len, signature,
+                                  signature_len, &message, &message_len)) {
+    printf("Failed to build token binding message\n");
+    exit(1);
+  }
+  free(tokbind_id);
+  if (referred_tokbind_id != NULL) {
+    free(referred_tokbind_id);
+  }
+  free(signature);
+  size_t buf_len = CalculateBase64EscapedLen(message_len, false);
+  char* buf = checkedCalloc(buf_len, sizeof(char));
+  size_t len =
+      WebSafeBase64Escape((char*)message, message_len, buf, buf_len, false);
+  free(message);
+  char* prefix = "Sec-Token-Binding: ";
+  size_t tbheader_len = strlen(prefix) + len + 1;
+  char* tbheader = checkedCalloc(tbheader_len, sizeof(char));
+  strcpy(tbheader, prefix);
+  strcat(tbheader, buf);
+  return tbheader;
+}
+
+bool readKey(FILE* file, char* etld_plus1, char* key_type_name,
+             char* encoded_key) {
+  /* Note: fscanf is unsafe and can cause buffer overflow.  It is used for
+     simplicity in this demo. */
+  if (fscanf(file, "%s %s %s\n", etld_plus1, key_type_name, encoded_key) == 3) {
+    return true;
+  }
+  return false;
+}
+
+tbKeyType getKeyTypeFromName(char* key_type_name) {
+  tbKeyType i;
+  for (i = 0; i < TB_INVALID_KEY_TYPE; i++) {
+    if (!strcmp(tbGetKeyTypeName(i), key_type_name)) {
+      return i;
+    }
+  }
+  return TB_INVALID_KEY_TYPE;
+}
+
+void saveOracleKeys(Oracle* oracle, const char *vault_filename) {
+  FILE* file = fopen(vault_filename, "w");
+  if (file == NULL) {
+    printf("Could not open key_vault for writing\n");
+    exit(1);
+  }
+  /* The format for each key, one per line, is:
+     etld+1 key_type_name base64Encoded(openssl_formatted_key_pair) */
+  Key* key;
+  for (key = oracle->first_key; key != NULL; key = key->next_key) {
+    fprintf(file, "%s %s %s\n", key->etld_plus1,
+            tbGetKeyTypeName(key->key_type), key->encoded_key);
+  }
+  fclose(file);
+}
+
+Oracle* readOracleKeys(const char *vault_filename) {
+  Oracle* oracle = checkedCalloc(1, sizeof(Oracle));
+  FILE* file = fopen(vault_filename, "r");
+  if (file == NULL) {
+    /* No keys to read yet. */
+    return oracle;
+  }
+  /* The format for each key, one per line, is:
+     etld+1 key_type_name base64Encoded(openssl_formatted_key_pair) */
+  char etld_plus1[kBufferSize];
+  char key_type_name[kBufferSize];
+  char encoded_key[kBufferSize];
+  while (readKey(file, etld_plus1, key_type_name, encoded_key)) {
+    tbKeyType key_type = getKeyTypeFromName(key_type_name);
+    createKey(oracle, etld_plus1, key_type, encoded_key);
+  }
+  fclose(file);
+  return oracle;
+}
+
+
+
+
+
 /*
  * Curl_http() gets called from the generic multi_do() function when a HTTP
  * request is to be performed. This creates and sends a properly constructed
@@ -2334,6 +2706,21 @@ CURLcode Curl_http(struct connectdata *conn, bool *done)
 
   if(result)
     return result;
+
+
+#if defined(USE_OPENSSL)
+    Connection* connection = checkedCalloc(1, sizeof(Connection));
+    connection->ssl = conn->ssl[FIRSTSOCKET].handle;
+    connection->key_type = conn->ssl[FIRSTSOCKET].key_type;
+    char* etld_plus1 = getETLDPlus1((conn->allocptr.host?conn->allocptr.host:""));
+    Oracle* oracle = readOracleKeys("/tmp/key_vault");
+    char *hdr = generateTokenBindingHeader(connection, oracle, etld_plus1, NULL);
+    result = Curl_add_bufferf(req_buffer, "%s\r\n", hdr);
+    if(result)
+      return result;
+    saveOracleKeys(oracle, "/tmp/key_vault");
+#endif
+
 
   if(!(conn->handler->flags&PROTOPT_SSL) &&
      conn->httpversion != 20 &&

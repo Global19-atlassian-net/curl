@@ -3852,6 +3852,26 @@ SUPPORT_PROTOCOLS=`echo $SUPPORT_PROTOCOLS | tr ' ' '\012' | sort | tr '\012' ' 
 
 AC_SUBST(SUPPORT_PROTOCOLS)
 
+
+AC_MSG_CHECKING([for Token Bind library])
+AC_ARG_WITH(
+	[token-binding],
+	[  --with-token-binding=PATH       Full path to the token binding library.],
+	[
+		TOKEN_BINDING=${withval}
+        CPPFLAGS="$CPPFLAGS -I$TOKEN_BINDING"
+	],)
+if test ! -d "$TOKEN_BINDING"; then
+   AC_MSG_RESULT([no])
+   AC_MSG_ERROR([
+Could not find Token Bind. Please specify the path to Token Bind
+using the --with-token-binding=/full/path/to/token_bind option.
+])
+fi
+AC_MSG_RESULT([yes])
+AC_SUBST(TOKEN_BINDING)
+
+
 dnl squeeze whitespace out of some variables
 
 squeeze CFLAGS
@@ -3924,6 +3944,7 @@ AC_MSG_NOTICE([Configured to build curl/libcurl:
   Install prefix:   ${prefix}
   Compiler:         ${CC}
   SSL support:      ${curl_ssl_msg}
+  Token Binding:    ${TOKEN_BINDING}
   SSH support:      ${curl_ssh_msg}
   zlib support:     ${curl_zlib_msg}
   GSS-API support:  ${curl_gss_msg}
