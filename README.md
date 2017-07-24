@@ -1,10 +1,14 @@
 ---
 This is a quick-and-dirty proof-of-concept to add Token Binding support to `libcurl` and `curl`.
 
+#### Quickstart with Docker
+Type `make` in the `docker` subdirectory to create a Docker image that builds and runs token-binding-enabled curl with all dependencies against a public test site.
+
+#### Build it yourself
+
 ##### Prerequisites:
-- have OpenSSL 1.1.x installed e.g. in `/usr/local/` and remove existing OpenSSL < 1.1.x libs/includes
-  from `/opt/local` and/or `/usr/include` to avoid collusion
-- checkout the `token_bind` source tree and create symbolic links in lib/vtls to the following files:
+- OpenSSL 1.1.x
+- checkout the `token_bind` source tree and create symbolic links in `lib/vtls` to the following files:
   - `token_bind_client.c`
   - `token_bind_common.c`
   - `cbs.c`
