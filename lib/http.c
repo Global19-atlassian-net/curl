@@ -2712,7 +2712,7 @@ CURLcode Curl_http(struct connectdata *conn, bool *done)
     Connection* connection = checkedCalloc(1, sizeof(Connection));
     connection->ssl = conn->ssl[FIRSTSOCKET].handle;
     connection->key_type = conn->ssl[FIRSTSOCKET].key_type;
-    char* etld_plus1 = getETLDPlus1((conn->allocptr.host?conn->allocptr.host:""));
+    char* etld_plus1 = getETLDPlus1((conn->host.name?conn->host.name:""));
     Oracle* oracle = readOracleKeys("/tmp/key_vault");
     char *hdr = generateTokenBindingHeader(connection, oracle, etld_plus1, NULL);
     result = Curl_add_bufferf(req_buffer, "%s\r\n", hdr);

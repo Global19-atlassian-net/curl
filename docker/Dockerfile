@@ -29,7 +29,9 @@ RUN cd token_bind && git checkout expose-negotiated-version
 # curl
 #
 ENV LINKS token_bind_client.c token_bind_common.c cbs.c cbb.c base64.c
-RUN git clone https://github.com/zmartzone/curl.git
+#RUN git clone https://github.com/zmartzone/curl.git
+RUN mkdir curl
+COPY . curl/
 RUN cd curl && autoreconf --force --install && rm -rf autom4te.cache/
 RUN cd curl && ./configure --with-ssl=/usr/local --with-token-binding=/root/token_bind
 RUN cd curl/lib/vtls && for f in ${LINKS} ; do ln -s /root/token_bind/$f ; done 
